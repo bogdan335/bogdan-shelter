@@ -1455,7 +1455,8 @@ function dealConds(n) {
   return shuffle(out).map(c => CONDS.indexOf(c));
 }
 
-function startGame(st) {
+function startGame(st, recent) {
+  const avoid = new Set(recent || []);
   const seats = Object.keys(st.players).map(Number).filter(s => st.players[s].joined).sort((a, b) => a - b);
   st.active = seats;
   const n = seats.length;
@@ -1477,7 +1478,10 @@ function startGame(st) {
   st.hints = makeHints(st);
   /* cards */
   const pools = {};
-  Object.keys(POOLS).forEach(k => { pools[k] = shuffle(POOLS[k]); });
+  Object.keys(POOLS).forEach(k => {
+    const isOld = c => !c.tags.healthy && avoid.has(k + ':' + c.t);
+    pools[k] = shuffle(POOLS[k].filter(isOld)).concat(shuffle(POOLS[k].filter(c => !isOld(c))));
+  });
   const acts = dealActions(seats), conds = dealConds(n);
   st.chars = {}; st.rev = {}; st.marks = {}; st.actUsed = {}; st.condRev = {}; st.condUsed = {};
   seats.forEach((s, i) => {
@@ -1493,6 +1497,9 @@ function startGame(st) {
   st.phase = 'play';
   st.introSeq = (st.introSeq || 0) + 1;
   say(st, `Игра началась. ${CATS[cat].name}.`);
+  const dealt = [];
+  seats.forEach(s => ['prof', 'health', 'hobby', 'phobia', 'char', 'habit', 'know', 'bag'].forEach(k => dealt.push(k + ':' + st.chars[s][k].t)));
+  return dealt;
 }
 
 function activeNeeds(st) {
@@ -2135,10 +2142,17 @@ let slideSig = {}, prevRev = {};
 /* ---------- sound ---------- */
 const SND = { ctx: null, on: store.get('shelter-sound', '1') === '1' };
 function audioUnlock() {
-  if (!SND.ctx) { try { SND.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }
+  try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch (_) {}
+  if (!SND.ctx) {
+    try {
+      SND.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const b = SND.ctx.createBuffer(1, 1, 22050), src = SND.ctx.createBufferSource();
+      src.buffer = b; src.connect(SND.ctx.destination); src.start(0);
+    } catch (_) {}
+  }
   if (SND.ctx && SND.ctx.state === 'suspended') SND.ctx.resume();
 }
-document.addEventListener('pointerdown', audioUnlock, { passive: true });
+['pointerdown', 'touchend', 'click'].forEach(ev => document.addEventListener(ev, audioUnlock, { passive: true }));
 function tone(t, f, dur, type = 'sine', vol = 0.3) {
   const c = SND.ctx, o = c.createOscillator(), g = c.createGain();
   o.type = type; o.frequency.setValueAtTime(f, t);
@@ -2429,7 +2443,11 @@ function onIntent(it) {
       break;
     }
     case 'bots': for (let s = 1; s <= st.n; s++) if (!st.players[s]) st.players[s] = { joined: true, bot: true }; break;
-    case 'start': if (st.phase === 'lobby' && Object.keys(st.players).length >= 2) startGame(st); break;
+    case 'start': if (st.phase === 'lobby' && Object.keys(st.players).length >= 2) {
+      const recent = JSON.parse(store.get('shelter-recent', '[]') || '[]');
+      const dealt = startGame(st, recent) || [];
+      store.set('shelter-recent', JSON.stringify(dealt.concat(recent).slice(0, 220)));
+    } break;
     case 'reveal': if (st.phase === 'play' && st.chars[it.seat] && TRAITS.includes(it.cat)) revealCat(st, it.seat, it.cat); break;
     case 'kick': if (st.phase === 'play') doKick(st, it.seat); break;
     case 'unkick': if (st.phase === 'play' && st.kicked.includes(it.seat)) { st.kicked = st.kicked.filter(x => x !== it.seat); delete st.pending[it.seat]; say(st, `№${it.seat} возвращён в игру.`); } break;
@@ -2516,6 +2534,18 @@ function resume() {
 }
 
 function onState(st) {
+  if (UI.pendingSeat) {
+    const ps = UI.pendingSeat, at = st.players && st.players[ps.s];
+    const mine = at && at.dev === DEV, other = at && at.dev !== DEV;
+    if (mine || other || Date.now() - ps.t > 5000 || st.phase !== 'lobby') {
+      UI.pendingSeat = null;
+      if (other) toast('<b>Не успел</b>Этот номер только что занял кто-то другой.');
+    } else {
+      Object.keys(st.players || {}).forEach(k => { if (st.players[k] && st.players[k].dev === DEV) delete st.players[k]; });
+      st.players[ps.s] = { joined: true, dev: DEV, name: ps.name };
+      ME.seat = ps.s;
+    }
+  }
   const prev = ST; ST = st;
   if (ME.seat && !st.players[ME.seat]) ME.seat = 0;
   if (!ME.seat) { const mine = Object.keys(st.players).find(k => st.players[k].dev === DEV); if (mine) { ME.seat = +mine; saveResume(); } }
@@ -2966,13 +2996,17 @@ function handle(act, el, e) {
       const nm = ($('#nameIn').value || '').trim().slice(0, 14);
       if (!nm) { toast('<b>Напиши имя</b>Так все увидят, кто за каким номером.'); $('#nameIn').focus(); break; }
       store.set('shelter-name', nm);
-      send({ type: 'join', seat: UI.wheelIdx, dev: DEV, immune: IMMUNE, name: nm }); break;
+      UI.pendingSeat = { s: UI.wheelIdx, t: Date.now(), name: nm };
+      send({ type: 'join', seat: UI.wheelIdx, dev: DEV, immune: IMMUNE, name: nm });
+      onState(JSON.parse(JSON.stringify(ST))); break;
     }
     case 'lobbySeat': {
       const s = +el.dataset.s, p = ST.players[s];
       if (s === ME.seat) break;
       if (p) { toast(`<b>№${s} занят</b>${p.bot ? 'Там бот.' : esc(p.name || 'Там уже кто-то сидит.')}`); break; }
-      send({ type: 'join', seat: s, dev: DEV, immune: IMMUNE, name: store.get('shelter-name', '') }); break;
+      UI.pendingSeat = { s, t: Date.now(), name: store.get('shelter-name', '') };
+      send({ type: 'join', seat: s, dev: DEV, immune: IMMUNE, name: store.get('shelter-name', '') });
+      onState(JSON.parse(JSON.stringify(ST))); break;
     }
     case 'bots': send({ type: 'bots' }); break;
     case 'start': send({ type: 'start' }); break;
