@@ -427,6 +427,8 @@ details .typed{margin-top:6px}
 .ptab small.nm{color:var(--ink-muted);max-width:54px;overflow:hidden;white-space:nowrap}
 .scratch.fading{opacity:0;transition:opacity 1.5s ease;pointer-events:none}
 
+.code .tile-c{width:58px}
+
 </style>
 </head>
 <body>
@@ -1999,6 +2001,20 @@ function computeEnding(st) {
    Clients send intents, host applies them and publishes the full state. */
 const FIREBASE_URL = 'https://shelter-bogdan-default-rtdb.europe-west1.firebasedatabase.app'; // ← сюда вставляется адрес базы Firebase, например https://shelter-xxxx-default-rtdb.europe-west1.firebasedatabase.app
 
+/* Firebase rewrites data: drops empty lists/objects and turns objects with number keys into arrays with holes.
+   Bring the state back to the shape the game expects. */
+function normState(st) {
+  if (!st || typeof st !== 'object') return st;
+  const obj = v => { if (!v || typeof v !== 'object') return {}; if (Array.isArray(v)) { const o = {}; v.forEach((x, i) => { if (x !== null && x !== undefined) o[i] = x; }); return o; } return v; };
+  const arr = v => Array.isArray(v) ? v.filter(x => x !== null && x !== undefined) : (v && typeof v === 'object' ? Object.keys(v).sort((a, b) => a - b).map(k => v[k]) : []);
+  ['players', 'chars', 'rev', 'marks', 'actUsed', 'condRev', 'condUsed', 'pending', 'priv', 'bonus', 'nextEvent'].forEach(k => { st[k] = obj(st[k]); });
+  ['active', 'kicked', 'banners', 'usedEvents', 'seen', 'hints', 'table', 'condLog'].forEach(k => { st[k] = arr(st[k]); });
+  st.active.forEach(s => { st.rev[s] = arr(st.rev[s]); st.marks[s] = arr(st.marks[s]); if (st.priv[s]) st.priv[s] = arr(st.priv[s]); const c = st.chars[s]; if (c) Object.keys(c).forEach(k => { if (c[k] && typeof c[k] === 'object' && !c[k].tags) c[k].tags = {}; }); });
+  if (st.bunker) st.bunker.rooms = arr(st.bunker.rooms);
+  if (st.event && st.event.sortie) st.event.sortie.need = arr(st.event.sortie.need);
+  if (st.ending) ['threats', 'lives', 'deadLines', 'fates', 'condLines', 'survivors'].forEach(k => { st.ending[k] = arr(st.ending[k]); });
+  return st;
+}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 class LocalNet {           /* demo: everything in this tab */
@@ -2063,9 +2079,9 @@ class FBNet {              /* real multiplayer through Firebase Realtime Databas
     return fetch(this._url('state')).then(r => r.json()).then(s => {
       if (!s || !s.code) throw new Error('notfound');
       this.es = new EventSource(this._url('state'));
-      this.es.addEventListener('put', e => { const { path, data } = JSON.parse(e.data); if (path === '/' && data) this.cb && this.cb(data); });
+      this.es.addEventListener('put', e => { const { path, data } = JSON.parse(e.data); if (path === '/' && data) this.cb && this.cb(normState(data)); });
       this.es.onerror = () => { this.onError && this.onError(); };
-      return s;
+      return normState(s);
     });
   }
   resume(code) { return this.join(code); }
@@ -2097,7 +2113,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const view = $('#view'), layer = $('#layer'), toasts = $('#toasts');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const ALPHA = 'ABCDEFGHJKLMNPRSTUVWXYZ';
-const randCode = () => Array.from({ length: 3 }, () => ALPHA[rnd(ALPHA.length)]).join('');
+const randCode = () => String(rnd(10000)).padStart(4, '0');
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
@@ -2295,9 +2311,9 @@ function joinHTML() {
     ${bar('Подключиться', 'toMenu')}
     <div class="sheet center">
       <div class="sheet-title">Код бункера</div>
-      <div class="code">${[0, 1, 2].map(i => `<input class="tile-c ci" data-i="${i}" maxlength="2" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Буква ${i + 1}">`).join('')}</div>
+      <div class="code">${[0, 1, 2, 3].map(i => `<input class="tile-c ci" data-i="${i}" maxlength="2" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Цифра ${i + 1}">`).join('')}</div>
       <button class="btn btn-small" data-act="paste">Вставить</button>
-      <p class="hint">Код из трёх латинских букв. Его даёт тот, кто создал игру.</p>
+      <p class="hint">Код из четырёх цифр. Его даёт тот, кто создал игру.</p>
     </div>
     <div class="grow"></div>
     <button class="btn btn-primary btn-block" data-act="joinNext">Далее</button>
@@ -2348,7 +2364,7 @@ const AFTER = {
   join() {
     const ins = [...document.querySelectorAll('.ci')];
     ins.forEach((el, i) => {
-      el.addEventListener('input', () => { const v = el.value.toUpperCase().replace(/[^A-Z]/g, ''); el.value = v.slice(-1); if (el.value && ins[i + 1]) ins[i + 1].focus(); });
+      el.addEventListener('input', () => { const v = el.value.replace(/[^0-9]/g, ''); el.value = v.slice(-1); if (el.value && ins[i + 1]) ins[i + 1].focus(); });
       el.addEventListener('keydown', e => { if (e.key === 'Backspace' && !el.value && ins[i - 1]) ins[i - 1].focus(); });
     });
   },
@@ -2520,11 +2536,12 @@ function onState(st) {
     SEEN.ev = st.event.seq; SEEN.evR = st.event.seqR || 0;
     if (fresh && st.phase === 'play') queueModal(() => showEvent(st.event));
   } else if (st.event && (st.event.seqR || 0) !== SEEN.evR) { SEEN.evR = st.event.seqR || 0; updateEventResult(st.event); }
+  if (!st.pending || !st.pending[ME.seat]) { PLAY.pendSent = false; if (MODAL_LOCK) closeModal(); }
   if (st.phase === 'end' && st.ending && !SEEN.ending) { SEEN.ending = true; queueModal(openEnding); }
   checkPending();
 }
 function checkPending() {
-  if (!ST || !ST.pending || !ST.pending[ME.seat] || busy()) return;
+  if (!ST || !ST.pending || !ST.pending[ME.seat] || busy() || PLAY.pendSent) return;
   openPending();
 }
 
@@ -2941,9 +2958,9 @@ function handle(act, el, e) {
       break;
     }
     case 'paste':
-      if (navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then(t => { const L = (t || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3); document.querySelectorAll('.ci').forEach((x, i) => { x.value = L[i] || ''; }); }).catch(() => toast('<b>Не вышло вставить</b>Введи код вручную.'));
+      if (navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then(t => { const L = (t || '').replace(/[^0-9]/g, '').slice(0, 4); document.querySelectorAll('.ci').forEach((x, i) => { x.value = L[i] || ''; }); }).catch(() => toast('<b>Не вышло вставить</b>Введи код вручную.'));
       break;
-    case 'joinNext': { const v = [...document.querySelectorAll('.ci')].map(i => i.value).join(''); if (v.length < 3) { toast('<b>Нужен код</b>Введи три буквы.'); break; } joinGame(v); break; }
+    case 'joinNext': { const v = [...document.querySelectorAll('.ci')].map(i => i.value).join(''); if (v.length < 4) { toast('<b>Нужен код</b>Введи четыре цифры.'); break; } joinGame(v); break; }
     case 'takeSeat': {
       if (takenSeats().includes(UI.wheelIdx)) break;
       const nm = ($('#nameIn').value || '').trim().slice(0, 14);
@@ -2972,7 +2989,7 @@ function handle(act, el, e) {
     case 'pGo': send({ type: 'play', seat: ME.seat, target: PLAY.t, target2: PLAY.t2, cat: PLAY.cat }); closeModal(); break;
     case 'pendT': PLAY.pt = +el.dataset.s; openPending(); break;
     case 'pendC': PLAY.pc = el.dataset.k; openPending(); break;
-    case 'pendGo': send({ type: 'choose', seat: ME.seat, target: PLAY.pt, cat: PLAY.pc }); PLAY.pt = 0; PLAY.pc = 'bag'; closeModal(); break;
+    case 'pendGo': send({ type: 'choose', seat: ME.seat, target: PLAY.pt, cat: PLAY.pc }); PLAY.pt = 0; PLAY.pc = 'bag'; PLAY.pendSent = true; closeModal(); break;
     case 'condReveal': send({ type: 'condReveal', seat: ME.seat }); break;
     case 'drawer': openDrawer(); break;
     case 'closeDrawer': closeDrawer(); break;
@@ -3003,6 +3020,7 @@ document.getElementById('app').addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (MODAL && !MODAL_LOCK) closeModal(true); else closeDrawer(); } });
 
+window.addEventListener('error', e => { if (ONLINE()) toast(`<b>Ошибка</b>${esc(e.message || 'что-то сломалось')}. Сделай скрин и обнови страницу.`, 7000); });
 go('menu');
 
 </script>
